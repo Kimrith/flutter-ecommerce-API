@@ -126,15 +126,6 @@ export class OrdersService {
               quantity: item.quantity,
             })),
           },
-          payment: {
-            create: {
-              amount: roundedTotal,
-              currency: 'USD',
-              paymentMethod:
-                createOrderDto.paymentMethod || PaymentMethod.BAKONG_KHQR,
-              status: 'PENDING',
-            },
-          },
         },
         include: {
           items: {
@@ -162,7 +153,12 @@ export class OrdersService {
 
   async getUserOrders(userId: string) {
     return this.prisma.order.findMany({
-      where: { userId },
+      where: {
+        userId,
+        status: {
+          not: OrderStatus.PENDING,
+        },
+      },
       include: {
         items: {
           include: { product: true },
@@ -273,6 +269,11 @@ export class OrdersService {
 
   async findAllOrders() {
     return this.prisma.order.findMany({
+      where: {
+        status: {
+          not: OrderStatus.PENDING,
+        },
+      },
       include: {
         items: {
           include: { product: true },

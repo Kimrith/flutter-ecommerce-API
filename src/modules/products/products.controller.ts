@@ -42,7 +42,7 @@ export class ProductsController {
   }
 
   @Post()
-  @Roles(Role.ADMIN, Role.MERCHANT)
+  @Roles(Role.ADMIN)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Create new product (Supports multiple image file uploads / FormFile)' })
   @ApiConsumes('multipart/form-data', 'application/json')

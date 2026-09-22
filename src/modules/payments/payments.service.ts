@@ -74,7 +74,7 @@ export class PaymentsService {
     const billNumber = order.orderNumber;
     const storeLabel = 'AH LEANG STORE';
     const terminalLabel = 'ONLINE-01';
-    const expirationTimestamp = Date.now() + 5 * 60 * 1000; // 5 minutes expiration for dynamic KHQR
+    const expirationTimestamp = Date.now() + 5 * 60 * 1000;
 
     try {
       const optionalData = {
@@ -108,14 +108,13 @@ export class PaymentsService {
       const md5 = khqrResponse.data.md5;
       const deepLink = `bakong://qr?code=${encodeURIComponent(khqrString)}`;
 
-      // Generate dynamic Base64 QR Code image
       const qrCode = await QRCode.toDataURL(khqrString, {
         errorCorrectionLevel: 'M',
         margin: 2,
         width: 300,
       });
 
-      // Create or update Payment record
+      // Save Payment metadata with MD5 so Bakong Webhook can match the transaction
       const payment = await this.prisma.payment.upsert({
         where: { orderId: order.id },
         create: {
@@ -162,20 +161,20 @@ export class PaymentsService {
   }
 
   async verifyKhqr(dto: VerifyKhqrDto) {
-    const payment = await this.prisma.payment.findFirst({
-      where: { orderId: dto.orderId, md5: dto.md5 },
-      include: { order: true },
+    const order = await this.prisma.order.findUnique({
+      where: { id: dto.orderId },
+      include: { payment: true },
     });
 
-    if (!payment) {
-      throw new NotFoundException('Payment record not found for this MD5');
+    if (!order) {
+      throw new NotFoundException('Order not found');
     }
 
-    if (payment.status === PaymentStatus.SUCCESS) {
+    if (order.payment?.status === PaymentStatus.SUCCESS || order.status === OrderStatus.PAID) {
       return {
         status: PaymentStatus.SUCCESS,
         isPaid: true,
-        orderId: payment.orderId,
+        orderId: order.id,
         message: 'Payment has already been confirmed as SUCCESS',
       };
     }
@@ -183,7 +182,6 @@ export class PaymentsService {
     let isSuccess = false;
     let transactionData = null;
 
-    // Check Bakong Open API if API Token is configured
     if (this.bakongApiToken) {
       try {
         const response = await fetch(`${this.bakongApiUrl}/check_transaction_by_md5`, {
@@ -207,22 +205,33 @@ export class PaymentsService {
         console.warn('Bakong Open API check failed:', errMsg);
       }
     } else {
-      // In development mode without live Bakong token, simulate verification when requested
+      // In development mode, confirm payment when verify is called
       isSuccess = true;
     }
 
     if (isSuccess) {
       await this.prisma.$transaction([
-        this.prisma.payment.update({
-          where: { id: payment.id },
-          data: {
+        this.prisma.payment.upsert({
+          where: { orderId: order.id },
+          create: {
+            orderId: order.id,
+            amount: order.totalAmount,
+            currency: 'USD',
+            paymentMethod: 'BAKONG_KHQR',
             status: PaymentStatus.SUCCESS,
+            md5: dto.md5,
+            transactionId: transactionData?.hash || `TXN-${Date.now()}`,
+            rawResponse: transactionData || { verifiedAt: new Date().toISOString() },
+          },
+          update: {
+            status: PaymentStatus.SUCCESS,
+            md5: dto.md5,
             transactionId: transactionData?.hash || `TXN-${Date.now()}`,
             rawResponse: transactionData || { verifiedAt: new Date().toISOString() },
           },
         }),
         this.prisma.order.update({
-          where: { id: payment.orderId },
+          where: { id: order.id },
           data: { status: OrderStatus.PAID },
         }),
       ]);
@@ -230,54 +239,43 @@ export class PaymentsService {
       return {
         status: PaymentStatus.SUCCESS,
         isPaid: true,
-        orderId: payment.orderId,
-        message: 'Payment verified and order status updated to PAID',
+        orderId: order.id,
+        message: 'Payment verified and stored in database as SUCCESS',
       };
     }
 
     return {
       status: PaymentStatus.PENDING,
       isPaid: false,
-      orderId: payment.orderId,
+      orderId: order.id,
       message: 'Payment has not been completed yet',
     };
   }
 
   async handleWebhook(dto: BakongWebhookDto) {
-    const payment = await this.prisma.payment.findUnique({
+    let payment = await this.prisma.payment.findFirst({
       where: { md5: dto.md5 },
-      include: { order: true },
     });
-
-    if (!payment) {
-      throw new NotFoundException('Payment record not found for webhook MD5');
-    }
 
     const isSuccess = dto.status === 'SUCCESS' || !dto.status;
 
     if (isSuccess) {
-      await this.prisma.$transaction([
-        this.prisma.payment.update({
-          where: { id: payment.id },
-          data: {
-            status: PaymentStatus.SUCCESS,
-            transactionId: dto.transactionId || `TXN-${Date.now()}`,
-            rawResponse: dto.data || (dto as any),
-          },
-        }),
-        this.prisma.order.update({
-          where: { id: payment.orderId },
-          data: { status: OrderStatus.PAID },
-        }),
-      ]);
-    } else {
-      await this.prisma.payment.update({
-        where: { id: payment.id },
-        data: {
-          status: PaymentStatus.FAILED,
-          rawResponse: dto.data || (dto as any),
-        },
-      });
+      if (payment) {
+        await this.prisma.$transaction([
+          this.prisma.payment.update({
+            where: { id: payment.id },
+            data: {
+              status: PaymentStatus.SUCCESS,
+              transactionId: dto.transactionId || `TXN-${Date.now()}`,
+              rawResponse: dto.data || (dto as any),
+            },
+          }),
+          this.prisma.order.update({
+            where: { id: payment.orderId },
+            data: { status: OrderStatus.PAID },
+          }),
+        ]);
+      }
     }
 
     return { received: true, status: isSuccess ? 'PAID' : 'FAILED' };
@@ -286,20 +284,17 @@ export class PaymentsService {
   async getPaymentByOrder(orderId: string, userId?: string) {
     const order = await this.prisma.order.findFirst({
       where: { id: orderId, ...(userId ? { userId } : {}) },
+      include: { payment: true },
     });
 
     if (!order) {
       throw new NotFoundException('Order not found');
     }
 
-    const payment = await this.prisma.payment.findUnique({
-      where: { orderId },
-    });
-
-    if (!payment) {
-      throw new NotFoundException('Payment details not generated yet for this order');
+    if (!order.payment) {
+      throw new NotFoundException('Payment details not found or payment is still pending');
     }
 
-    return payment;
+    return order.payment;
   }
 }

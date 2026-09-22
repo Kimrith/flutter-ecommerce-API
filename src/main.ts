@@ -8,16 +8,20 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
-  // Serve Static Assets from uploads directory
-  app.useStaticAssets(join(process.cwd(), 'uploads'), {
-    prefix: '/uploads/',
-  });
-
   // Enable CORS
   app.enableCors({
     origin: '*',
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     credentials: true,
+  });
+
+  // Serve Static Assets from uploads directory (with CORS headers)
+  app.useStaticAssets(join(process.cwd(), 'uploads'), {
+    prefix: '/uploads/',
+    setHeaders: (res) => {
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Access-Control-Allow-Methods', 'GET,HEAD,OPTIONS');
+    },
   });
 
   // Set Global Prefix
@@ -45,7 +49,7 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api/docs', app, document);
 
-  const port = process.env.PORT || 3000;
+  const port = process.env.PORT || 3300;
   await app.listen(port);
   console.log(`🚀 Server running on http://localhost:${port}/api/v1`);
   console.log(`📚 Swagger documentation available at http://localhost:${port}/api/docs`);
